@@ -67,7 +67,14 @@ io.on('connection', (socket) => {
 
 // Connect to DB and start server
 
+// Connect to DB and start server
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
+  .then(() => {
+    console.log("✅ MongoDB Connected");
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  })
   .catch(err => console.error("❌ MongoDB Connection Error:", err));
+
 
