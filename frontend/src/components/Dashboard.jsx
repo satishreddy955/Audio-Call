@@ -4,7 +4,7 @@ import { getToken, authHeader, removeToken } from '../utils/auth';
 import { useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = process.env.REACT_APP_SOCKET || 'http://localhost:5000';
+const SOCKET_URL = process.env.REACT_APP_SOCKET || 'https://audio-call-fs74.onrender.com';
 
 export default function Dashboard(){
   const nav = useNavigate();
