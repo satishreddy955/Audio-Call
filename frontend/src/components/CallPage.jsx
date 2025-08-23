@@ -20,12 +20,11 @@ export default function CallPage(){
   const [status, setStatus] = useState('starting');
   const [peerUser, setPeerUser] = useState(loc.state?.peerUser || null);
   const [myUser, setMyUser] = useState(null);
+  const [incomingCall, setIncomingCall] = useState(null); // store caller info
 
-  // buffer ICE candidates until we know remote socket id
   const iceQueueRef = useRef([]);
   const setRemoteSocket = (sockId) => {
     socketRef.current._remoteSocket = sockId;
-    // flush queued candidates
     if (iceQueueRef.current.length) {
       iceQueueRef.current.forEach(c =>
         socketRef.current.emit('ice-candidate', { toSocket: sockId, candidate: c })
@@ -36,9 +35,6 @@ export default function CallPage(){
 
   useEffect(() => {
     API('/api/users/me', { headers: authHeader() }).then(setMyUser).catch(()=>{});
-    if (!peerUser) {
-      // you may fetch peer details by id here if needed
-    }
   }, []);
 
   useEffect(() => {
@@ -49,16 +45,15 @@ export default function CallPage(){
       });
     });
 
+    // Incoming call handler
     socketRef.current.on('incoming-call', async ({ offer, fromUser, fromName, fromSocket }) => {
-      console.log('[Signaling] Incoming call from', fromUser, fromName, 'socket:', fromSocket);
+      console.log('[Signaling] Incoming call from', fromName);
+      setIncomingCall({ fromUser, fromName, fromSocket, offer });
       setStatus('incoming');
-      socketRef.current._lastIncoming = { fromSocket, fromUser, fromName, offer };
     });
 
     socketRef.current.on('call-accepted', async ({ answer, fromSocket }) => {
       try {
-        console.log('[Signaling] Call accepted by socket:', fromSocket);
-        // store remote socket so our ICE can be delivered
         setRemoteSocket(fromSocket);
         await pcRef.current.setRemoteDescription(answer);
         setStatus('in-call');
@@ -67,11 +62,15 @@ export default function CallPage(){
       }
     });
 
+    socketRef.current.on('call-rejected', () => {
+      alert('Your call was rejected');
+      endCall();
+    });
+
     socketRef.current.on('ice-candidate', async ({ candidate, fromSocket }) => {
       try {
         if (candidate && pcRef.current) {
           await pcRef.current.addIceCandidate(candidate);
-          // set remote socket opportunistically if we didn't have it (rare)
           if (!socketRef.current._remoteSocket && fromSocket) setRemoteSocket(fromSocket);
         }
       } catch (e) {
@@ -85,41 +84,26 @@ export default function CallPage(){
     });
 
     return () => socketRef.current.disconnect();
-    // eslint-disable-next-line
   }, []);
 
   const createPeerConnection = () => {
     const pc = new RTCPeerConnection(ICE_CONFIG);
-
     pc.onicecandidate = e => {
       if (e.candidate) {
         const remoteSock = socketRef.current._remoteSocket;
         if (remoteSock) {
           socketRef.current.emit('ice-candidate', { toSocket: remoteSock, candidate: e.candidate });
         } else {
-          // buffer until we learn remote socket id
           iceQueueRef.current.push(e.candidate);
         }
       }
     };
-
     pc.ontrack = e => {
-      console.log('[PC] Remote track received', e.streams);
       if (remoteAudioRef.current) {
         remoteAudioRef.current.srcObject = e.streams[0];
-        // ensure autoplay
-        const p = remoteAudioRef.current.play();
-        if (p?.catch) p.catch(err => console.warn('Autoplay blocked:', err));
+        remoteAudioRef.current.play().catch(err => console.warn('Autoplay blocked:', err));
       }
     };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log('[PC] ICE state:', pc.iceConnectionState);
-      if (['failed', 'disconnected'].includes(pc.iceConnectionState)) {
-        // Often indicates TURN is needed or network hiccup
-      }
-    };
-
     pcRef.current = pc;
   };
 
@@ -129,52 +113,50 @@ export default function CallPage(){
     stream.getTracks().forEach(track => pcRef.current.addTrack(track, stream));
   };
 
-  // Caller flow
   const callUser = async () => {
     try {
       setStatus('calling');
       createPeerConnection();
       await startLocalStream();
-
       const offer = await pcRef.current.createOffer();
       await pcRef.current.setLocalDescription(offer);
-
       socketRef.current.emit('call-user', {
         toUserId: peerId,
         offer: pcRef.current.localDescription,
-        fromUser: myUser ? myUser._id : null,
-        fromName: myUser ? myUser.username : 'Unknown'
+        fromUser: myUser?._id,
+        fromName: myUser?.username || 'Unknown'
       });
     } catch (err) {
       console.error(err); setStatus('error'); alert('Call failed');
     }
   };
 
-  // Callee flow
   const acceptCall = async () => {
     try {
+      if (!incomingCall) return;
       setStatus('connecting');
-      const incoming = socketRef.current._lastIncoming;
-      if (!incoming) { alert('No incoming call'); return; }
-
       createPeerConnection();
       await startLocalStream();
-
-      await pcRef.current.setRemoteDescription(incoming.offer);
+      await pcRef.current.setRemoteDescription(incomingCall.offer);
       const answer = await pcRef.current.createAnswer();
       await pcRef.current.setLocalDescription(answer);
-
-      // store caller's socket to allow sending ICE immediately
-      setRemoteSocket(incoming.fromSocket);
-
+      setRemoteSocket(incomingCall.fromSocket);
       socketRef.current.emit('answer-call', {
-        toSocket: incoming.fromSocket,
+        toSocket: incomingCall.fromSocket,
         answer: pcRef.current.localDescription
       });
-
+      setIncomingCall(null);
       setStatus('in-call');
     } catch (err) {
       console.error(err); setStatus('error');
+    }
+  };
+
+  const rejectCall = () => {
+    if (incomingCall) {
+      socketRef.current.emit('reject-call', { toSocket: incomingCall.fromSocket });
+      setIncomingCall(null);
+      setStatus('idle');
     }
   };
 
@@ -187,11 +169,10 @@ export default function CallPage(){
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(t => t.stop());
       }
-    } catch (e) {}
+    } catch {}
     pcRef.current = null;
     localStreamRef.current = null;
     setStatus('ended');
-
     if (socketRef.current && socketRef.current._remoteSocket) {
       socketRef.current.emit('end-call', { toSocket: socketRef.current._remoteSocket });
     }
@@ -200,15 +181,22 @@ export default function CallPage(){
 
   return (
     <div className="call-page">
-      <h3>Call with {peerUser ? peerUser.username : (peerId || '')}</h3>
+      <h3>Call with {peerUser ? peerUser.username : peerId}</h3>
       <p>Status: {status}</p>
-
-      {/* remote audio element */}
       <audio ref={remoteAudioRef} autoPlay playsInline />
 
+      {/* Incoming call popup */}
+      {status === 'incoming' && incomingCall && (
+        <div className="incoming-popup">
+          <p>{incomingCall.fromName} is calling you...</p>
+          <button onClick={acceptCall}>Accept</button>
+          <button onClick={rejectCall}>Reject</button>
+        </div>
+      )}
+
+      {/* Controls */}
       <div className="call-controls">
         {status === 'starting' && <button onClick={callUser}>Call</button>}
-        {status === 'incoming' && <button onClick={acceptCall}>Accept</button>}
         {(status === 'in-call' || status === 'calling' || status === 'connecting') &&
           <button onClick={endCall}>End Call</button>}
       </div>
