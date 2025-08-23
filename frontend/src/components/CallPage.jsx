@@ -4,7 +4,7 @@ import { io } from 'socket.io-client';
 import API from '../api';
 import { authHeader, getToken } from '../utils/auth';
 
-const SOCKET_URL = process.env.REACT_APP_SOCKET || 'http://localhost:5000';
+const SOCKET_URL = process.env.REACT_APP_SOCKET || 'https://audio-call-fs74.onrender.com';
 const ICE_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 export default function CallPage(){
